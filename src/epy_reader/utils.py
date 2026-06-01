@@ -43,6 +43,30 @@ def safe_curs_set(state: int) -> None:
         pass
 
 
+def display_width(s: str) -> int:
+    """Calculate the display width of a string (CJK chars take 2 columns)."""
+    width = 0
+    for ch in s:
+        if ord(ch) > 127:
+            width += 2
+        else:
+            width += 1
+    return width
+
+
+def truncate_by_width(s: str, max_width: int) -> str:
+    """Truncate a string to fit within max display width."""
+    result = []
+    width = 0
+    for ch in s:
+        ch_width = 2 if ord(ch) > 127 else 1
+        if width + ch_width > max_width:
+            break
+        result.append(ch)
+        width += ch_width
+    return "".join(result)
+
+
 def find_current_content_index(
     toc_entries: Tuple[TocEntry, ...], toc_secid: Mapping[str, int], index: int, y: int
 ) -> int:
@@ -129,7 +153,7 @@ def choice_win(allowdel=False):
                 # remove newline from choice entries
                 # mostly happens in FictionBook (.fb2) format
                 strs = "  " + i.replace("\n", " ")
-                strs = strs[0 : wi - 3]
+                strs = truncate_by_width(strs, wi - 3)
                 pad.addstr(n, 0, strs)
                 span.append(len(strs))
 
