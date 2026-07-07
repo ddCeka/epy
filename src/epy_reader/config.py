@@ -2,16 +2,19 @@ import dataclasses
 import json
 import os
 import sys
-from typing import Mapping, Tuple, Union
+from typing import Any, Mapping, Tuple, Union
 
 import epy_reader.settings as settings
 from epy_reader.models import AppData, Key
 
+DEBUG = False
+
 
 class Config(AppData):
     def __init__(self):
-        setting_dict = dataclasses.asdict(settings.Settings())
-        keymap_dict = dataclasses.asdict(settings.CfgDefaultKeymaps())
+        super().__init__()
+        setting_dict: Mapping[str, Any] = dataclasses.asdict(settings.Settings())
+        keymap_dict: Mapping[str, Any] = dataclasses.asdict(settings.CfgDefaultKeymaps())
         keymap_builtin_dict = dataclasses.asdict(settings.CfgBuiltinKeymaps())
 
         if os.path.isfile(self.filepath):
@@ -31,14 +34,16 @@ class Config(AppData):
         if sys.platform == "win32":
             setting_dict["PageScrollAnimation"] = False
 
-        self.setting = settings.Settings(**setting_dict)
+        self.settings = settings.Settings(**setting_dict)
         self.keymap = settings.Keymap(**keymap_updated)
         # to build help menu text
         self.keymap_user_dict = keymap_dict
 
+        self.history_file = os.path.join(self.prefix, "readline_history.txt")
+
     @property
     def filepath(self) -> str:
-        return os.path.join(self.prefix, "configuration.json") if self.prefix else os.devnull
+        return os.path.join(self.prefix, "configuration.json")
 
     def save(self, cfg_dict):
         with open(self.filepath, "w") as file:

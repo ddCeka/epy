@@ -30,12 +30,26 @@ This is just a fork of [epr](https://github.com/wustho/epr) with these extra fea
 
   ```shell
   pip3 install epy-reader
+
+  # or with pipx (better)
+  pipx install epy-reader
   ```
 
 - Via Pip+Git
 
   ```shell
   pip3 install git+https://github.com/wustho/epy
+
+  # or with pipx (better)
+  pipx install git+https://github.com/wustho/epy
+  ```
+
+- Via local+Pipx
+
+  ```shell
+  git clone --depth=1 https://github.com/wustho/epy
+  cd epy/
+  pipx install -e .
   ```
 
 - Via AUR
@@ -65,6 +79,7 @@ This is just a fork of [epr](https://github.com/wustho/epr) with these extra fea
 - **+** Enlarge the text
 - **o** Open an image
 - **s** Show or hide progress
+- **!** Start TTS (with additional setup, read [below](#text-to-speech))
 
 ## Color profiles
 In the config file you will see the following section.
@@ -80,9 +95,9 @@ Change the values by using this image. (Make sure to ignore zeros at the beginni
 
 ## Reading Tips Using Epy
 
-When reading using `epy` you might occasionally find triple asteriks `***`.
+When reading using `epy` you might occasionally find triple asterisks `***`.
 That means you reach the end of some section in your ebook
-and the next line (right after those three asteriks, which is in new section)
+and the next line (right after those three asterisks, which is in new section)
 will start at the top of the page.
 This might be disorienting, so the best way to get seamless reading experience
 is by using next-page control (`space`, `l` or `Right`)
@@ -138,6 +153,9 @@ To get Text-to-Speech (TTS) support, external TTS engine is necessary.
 
 List of supported engines:
 
+- `speechd` (using spd-say)
+  - [Speech Dispatcher](https://github.com/brailcom/speechd) allow you to easily use other engines system-wide or per application, with default values and custom parameters.
+  - [Piper](https://github.com/rhasspy/piper) is a good neural engine easy to setup with speechd, fast enough even on low-end hardware.
 - `mimic`
 - `pico2wave`
 - `gtts-mpv` (requires both [gTTS](https://pypi.org/project/gTTS) and [MPV](https://www.mpv.io))

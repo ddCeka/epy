@@ -4,13 +4,20 @@ import re
 import sys
 import textwrap
 from functools import wraps
+from multiprocessing.connection import Connection
 from typing import List, Mapping, Optional, Sequence, Tuple, Union
 
 from epy_reader.ebooks import URL, Azw, Ebook, Epub, FictionBook, Mobi
 from epy_reader.lib import is_url, tuple_subtract
 from epy_reader.models import Key, LettersCount, NoUpdate, ReadingState, TextStructure, TocEntry
 from epy_reader.parser import parse_html
-from epy_reader.speakers import SpeakerBaseModel, SpeakerMimic, SpeakerPico, SpeakerGttsMPV
+from epy_reader.speakers import (
+    SpeakerBaseModel,
+    SpeakerSpeechd,
+    SpeakerMimic,
+    SpeakerPico,
+    SpeakerGttsMPV,
+)
 
 
 def get_ebook_obj(filepath: str) -> Ebook:
@@ -33,7 +40,7 @@ def safe_curs_set(state: int) -> None:
     try:
         curses.curs_set(state)
     except:
-        return
+        pass
 
 
 def find_current_content_index(
@@ -100,7 +107,7 @@ def choice_win(allowdel=False):
             chwin.addstr(2, 2, "-" * len(title))
             if allowdel:
                 chwin.addstr(3, 2, "HINT: Press 'd' to delete.")
-            key_chwin = 0
+            key_chwin: Key = Key(0)
 
             totlines = len(ch_list)
             chwin.refresh()
@@ -133,7 +140,7 @@ def choice_win(allowdel=False):
                 else:
                     count = int(countstring)
                 if key_chwin in tuple(Key(i) for i in range(48, 58)):  # i.e., k is a numeral
-                    countstring = countstring + key_chwin.char
+                    countstring = f"{countstring}{key_chwin}"
                 else:
                     if key_chwin in self.keymap.ScrollUp + self.keymap.PageUp:
                         index -= count
@@ -193,7 +200,9 @@ def choice_win(allowdel=False):
                     att = curses.A_REVERSE if index == n else curses.A_NORMAL
                     pre = ">>" if index == n else "  "
                     pad.addstr(n, 0, pre)
-                    pad.chgat(n, 0, span[n], pad.getbkgd() | att)
+                    bkgd_out = pad.getbkgd()
+                    bkgd_attr: int = bkgd_out[1] if isinstance(bkgd_out, tuple) else bkgd_out
+                    pad.chgat(n, 0, span[n], bkgd_attr | att)
 
                 pad.refresh(y, 0, Y + 4 + (1 if allowdel else 0), X + 4, rows - 5, cols - 6)
                 # pad.refresh(y, 0, Y+5, X+4, rows - 5, cols - 6)
@@ -337,10 +346,12 @@ def construct_relative_reading_state(
         content_index=index,
         textwidth=abs_reading_state.textwidth,
         row=abs_reading_state.row - cumulative_contents_lines + content_lines,
-        rel_pctg=abs_reading_state.rel_pctg
-        - ((cumulative_contents_lines - content_lines) / all_contents_lines)
-        if abs_reading_state.rel_pctg
-        else None,
+        rel_pctg=(
+            abs_reading_state.rel_pctg
+            - ((cumulative_contents_lines - content_lines) / all_contents_lines)
+            if abs_reading_state.rel_pctg
+            else None
+        ),
         section=abs_reading_state.section,
     )
 
@@ -348,26 +359,38 @@ def construct_relative_reading_state(
 def count_letters(ebook: Ebook) -> LettersCount:
     per_content_counts: List[int] = []
     cumulative_counts: List[int] = []
-    # assert isinstance(ebook.contents, tuple)
+    assert isinstance(ebook.contents, tuple)
     for i in ebook.contents:
         content = ebook.get_raw_text(i)
-        src_lines = parse_html(content)
-        assert isinstance(src_lines, tuple)
+        src_lines_structure = parse_html(content, textwidth=0)  # Pass 0 to get only text_lines
+        # Now src_lines_structure is TextStructure. You need to access its text_lines attribute.
+        assert isinstance(src_lines_structure.text_lines, tuple)
         cumulative_counts.append(sum(per_content_counts))
-        per_content_counts.append(sum([len(re.sub(r"\s", "", j)) for j in src_lines]))
+        per_content_counts.append(
+            sum([len(re.sub(r"\s", "", j)) for j in src_lines_structure.text_lines])
+        )
 
     return LettersCount(all=sum(per_content_counts), cumulative=tuple(cumulative_counts))
 
 
-def count_letters_parallel(ebook: Ebook, child_conn) -> None:
-    child_conn.send(count_letters(ebook))
-    child_conn.close()
+def count_letters_parallel(filepath: str, conn: Connection):
+    """
+    Counts letters in an ebook in a separate process.
+    Receives the ebook's filepath and a connection for sending results.
+    """
+    # The child process opens its own ebook object
+    ebook_obj_in_child_process = get_ebook_obj(filepath)
+    ebook_obj_in_child_process.initialize()
+    letters_count = count_letters(ebook_obj_in_child_process)
+    ebook_obj_in_child_process.cleanup()
+    conn.send(letters_count)
+    conn.close()
 
 
 def construct_speaker(
     preferred: Optional[str] = None, args: List[str] = []
 ) -> Optional[SpeakerBaseModel]:
-    available_speakers = [SpeakerMimic, SpeakerPico, SpeakerGttsMPV]
+    available_speakers = [SpeakerSpeechd, SpeakerMimic, SpeakerPico, SpeakerGttsMPV]
     sorted_speakers = (
         sorted(available_speakers, key=lambda x: int(x.cmd == preferred), reverse=True)
         if preferred

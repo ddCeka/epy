@@ -1,4 +1,6 @@
 import curses
+import os
+import os.path
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import List, Optional, Tuple
@@ -40,6 +42,7 @@ class Settings:
     PageScrollAnimation: bool = True
     MouseSupport: bool = False
     StartWithDoubleSpread: bool = False
+    NoColors: int = False
     # -1 is default terminal fg/bg colors
     DefaultColorFG: int = -1
     DefaultColorBG: int = -1

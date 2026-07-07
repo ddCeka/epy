@@ -1,4 +1,3 @@
-import copy
 import curses
 import dataclasses
 import multiprocessing
@@ -17,11 +16,12 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
 
 import epy_reader.settings as settings
 from epy_reader.board import InfiniBoard
-from epy_reader.config import Config
+from epy_reader.config import Config, DEBUG
 from epy_reader.ebooks import Azw, Ebook, Epub, Mobi
 from epy_reader.lib import resolve_path
 from epy_reader.models import (
     Direction,
+    FileHistory,
     InlineStyle,
     Key,
     LettersCount,
@@ -50,19 +50,18 @@ from epy_reader.utils import (
 )
 
 
-# TODO: to be deprecated
-DEBUG = False
-
-
 class Reader:
     def __init__(self, screen, ebook: Ebook, config: Config, state: State):
 
-        self.setting = config.setting
+        self.settings = config.settings
         self.keymap = config.keymap
         # to build help menu text
         self.keymap_user_dict = config.keymap_user_dict
 
-        self.seamless = self.setting.SeamlessBetweenChapters
+        self.seamless = self.settings.SeamlessBetweenChapters
+
+        # Initialize FileHistory instance
+        self.file_history = FileHistory(os.path.join(config.prefix, "epy_history.txt"))
 
         # keys that will make
         # windows exit and return the said key
@@ -76,27 +75,31 @@ class Reader:
 
         # screen initialization
         self.screen = screen
+        # screen color
+        self.is_color_supported = curses.has_colors()
+
+        if self.is_color_supported:
+            curses.start_color()
+            if self.settings.NoColors:
+                curses.use_default_colors()
+                # Example: Red text on default background
+                curses.init_pair(1, curses.COLOR_RED, -1)
+            else:
+                # Example: White text on black background
+                curses.init_pair(1, curses.COLOR_WHITE, curses.COLOR_BLACK)
+                curses.init_pair(2, curses.COLOR_CYAN, curses.COLOR_BLUE)
+
+        curses.noecho()
+        curses.cbreak()
         self.screen.keypad(True)
         safe_curs_set(0)
-        if self.setting.MouseSupport:
+        if self.settings.MouseSupport:
             curses.mousemask(-1)
         # curses.mouseinterval(0)
         self.screen.clear()
 
-        # screen color
-        self.is_color_supported: bool = False
-        try:
-            curses.use_default_colors()
-            curses.init_pair(1, self.setting.DefaultColorFG, self.setting.DefaultColorBG)
-            curses.init_pair(2, self.setting.DarkColorFG, self.setting.DarkColorBG)
-            curses.init_pair(3, self.setting.LightColorFG, self.setting.LightColorBG)
-            self.screen.bkgd(curses.color_pair(1))
-            self.is_color_supported = True
-        except:
-            self.is_color_supported = False
-
         # show loader and start heavy resources processes
-        self.show_loader(subtext="initalizing ebook")
+        self.show_loader(subtext="initializing ebook")
 
         # main ebook object
         self.ebook = ebook
@@ -116,21 +119,21 @@ class Reader:
         self.page_animation: Optional[Direction] = None
 
         # show reading progress
-        self.show_reading_progress: bool = self.setting.ShowProgressIndicator
+        self.show_reading_progress: bool = self.settings.ShowProgressIndicator
         self.reading_progress: Optional[float] = None  # calculate after count_letters()
 
         # search storage
         self.search_data: Optional[SearchData] = None
 
         # double spread
-        self.spread = 2 if self.setting.StartWithDoubleSpread else 1
+        self.spread = 2 if self.settings.StartWithDoubleSpread else 1
 
         # jumps marker container
         self.jump_list: Dict[str, ReadingState] = dict()
 
         # TTS speaker utils
         self._tts_speaker: Optional[SpeakerBaseModel] = construct_speaker(
-            self.setting.PreferredTTSEngine, self.setting.TTSEngineArgs
+            self.settings.PreferredTTSEngine, self.settings.TTSEngineArgs
         )
         self.tts_support: bool = bool(self._tts_speaker)
         self.is_speaking: bool = False
@@ -147,7 +150,8 @@ class Reader:
                 self._process_counting_letter = multiprocessing.Process(
                     name="epy-subprocess-counting-letters",
                     target=count_letters_parallel,
-                    args=(copy.deepcopy(self.ebook), self._proc_child),
+                    # Pass only the filepath, not the entire ebook object
+                    args=(self.ebook.path, self._proc_child),
                 )
                 # forking will raise
                 # zlib.error: Error -3 while decompressing data: invalid distance too far back
@@ -194,8 +198,8 @@ class Reader:
     def ext_dict_app(self) -> Optional[str]:
         self._ext_dict_app: Optional[str] = None
 
-        if shutil.which(self.setting.DictionaryClient.split()[0]):
-            self._ext_dict_app = self.setting.DictionaryClient
+        if shutil.which(self.settings.DictionaryClient.split()[0]):
+            self._ext_dict_app = self.settings.DictionaryClient
         else:
             for i in settings.DICT_PRESET_LIST:
                 if shutil.which(i) is not None:
@@ -210,8 +214,8 @@ class Reader:
     def image_viewer(self) -> Optional[str]:
         self._image_viewer: Optional[str] = None
 
-        if shutil.which(self.setting.DefaultViewer.split()[0]) is not None:
-            self._image_viewer = self.setting.DefaultViewer
+        if shutil.which(self.settings.DefaultViewer.split()[0]) is not None:
+            self._image_viewer = self.settings.DefaultViewer
         elif sys.platform == "win32":
             self._image_viewer = "start"
         elif sys.platform == "darwin":
@@ -230,6 +234,8 @@ class Reader:
     def open_image(self, pad, name, bstr):
         sfx = os.path.splitext(name)[1]
         fd, path = tempfile.mkstemp(suffix=sfx)
+        if self.image_viewer is None:
+            return NoUpdate()
         try:
             with os.fdopen(fd, "wb") as tmp:
                 # tmp.write(epub.file.read(src))
@@ -246,7 +252,7 @@ class Reader:
             os.remove(path)
         return k
 
-    def show_loader(self, *, loader_str: str = "\u231B", subtext: Optional[str] = None):
+    def show_loader(self, *, loader_str: str = "\u231b", subtext: Optional[str] = None):
         self.screen.clear()
         rows, cols = self.screen.getmaxyx()
         middle_row = (rows - 1) // 2
@@ -327,7 +333,11 @@ class Reader:
         if err == b"":
             return "Definition: " + word.upper(), out.decode(), self.keymap.DefineWord
         else:
-            return "Error: " + self.ext_dict_app, err.decode(), self.keymap.DefineWord
+            return (
+                "Error: " + (self.ext_dict_app if self.ext_dict_app else ""),
+                err.decode(),
+                self.keymap.DefineWord,
+            )
 
     def show_win_choices_bookmarks(self):
         idx = 0
@@ -365,73 +375,111 @@ class Reader:
                  Key if curses.KEY_RESIZE triggered
                  str for successful input
         """
-        # prevent pad hole when prompting for input while
-        # other window is active
-        # pad.refresh(y, 0, 0, x, rows-2, x+width)
         rows, cols = self.screen.getmaxyx()
+
         stat = curses.newwin(1, cols, rows - 1, 0)
-        if self.is_color_supported:
-            stat.bkgd(self.screen.getbkgd())
+        if self.is_color_supported and not self.settings.NoColors:
+            stat.bkgd(curses.color_pair(1))
+        # Instead, set a default color pair that might be the terminal's default
+        # or just avoid setting `bkgd` on this window, relying on the parent's attributes.
+        # If you need to ensure a contrasting prompt, you might need to
+        # initialize a specific color pair *if* curses.start_color() is called
+        # elsewhere (which we're trying to avoid here for the main reading area).
+        # For this specific prompt, if it's drawing *over* the content,
+        # curses.A_REVERSE on the prompt line usually provides good contrast.
+
         stat.keypad(True)
-        curses.echo(True)
-        safe_curs_set(2)
+        curses.echo(True)  # Re-enable echoing for this specific input window
+        safe_curs_set(2)  # Make cursor visible
 
         init_text = ""
+        self.file_history.reset_index()  # Reset history index for a new prompt
 
-        stat.addstr(0, 0, prompt, curses.A_REVERSE)
-        stat.addstr(0, len(prompt), init_text)
-        stat.refresh()
+        self._draw_prompt_line(stat, prompt, init_text, cols)
 
         try:
             while True:
-                # NOTE: getch() only handles ascii
-                # to handle wide char like: é, use get_wch()
                 ipt = Key(stat.get_wch())
-                # get_wch() return ambiguous type
-                # str for string input but int for function or special keys
-                # if type(ipt) == str:
-                #     ipt = ord(ipt)
 
-                if ipt == Key(27):
+                if ipt == Key(27):  # ESC
                     stat.clear()
                     stat.refresh()
                     curses.echo(False)
                     safe_curs_set(0)
                     return NoUpdate()
-                elif ipt == Key(10):
+                elif ipt == Key(10):  # Enter
                     stat.clear()
                     stat.refresh()
                     curses.echo(False)
                     safe_curs_set(0)
-                    return init_text if init_text else NoUpdate()
+                    self.file_history.add_command(init_text)  # Add to history
+                    return init_text
+                    # The original returned NoUpdate() for empty init_text,
+                    # so you can add: `else: return NoUpdate()` if needed.
                 elif ipt in (Key(8), Key(127), Key(curses.KEY_BACKSPACE)):
                     init_text = init_text[:-1]
                 elif ipt == Key(curses.KEY_RESIZE):
+                    # Handle resize - return the key to the main loop to re-layout
                     stat.clear()
                     stat.refresh()
                     curses.echo(False)
                     safe_curs_set(0)
                     return Key(curses.KEY_RESIZE)
-                # elif len(init_text) <= maxlen:
+                elif ipt == Key(curses.KEY_UP):
+                    # Navigate up in history
+                    history_item = self.file_history.navigate_up(init_text)
+                    if history_item is not None:
+                        init_text = history_item
+                elif ipt == Key(curses.KEY_DOWN):
+                    # Navigate down in history
+                    history_item = self.file_history.navigate_down()
+                    if history_item is not None:  # Can be empty string if at bottom/no history
+                        init_text = history_item
                 else:
-                    init_text += ipt.char
+                    # If any other character is typed, it's a new input.
+                    # This also resets history navigation.
+                    self.file_history.reset_index()
+                    if hasattr(ipt, "char"):
+                        init_text += ipt.char
 
-                stat.clear()
-                stat.addstr(0, 0, prompt, curses.A_REVERSE)
-                stat.addstr(
-                    0,
-                    len(prompt),
-                    init_text
-                    if len(prompt + init_text) < cols
-                    else "..." + init_text[len(prompt) - cols + 4 :],
-                )
-                stat.refresh()
+                # Redraw the prompt line within its own window
+                self._draw_prompt_line(stat, prompt, init_text, cols)
         except KeyboardInterrupt:
             stat.clear()
             stat.refresh()
             curses.echo(False)
             safe_curs_set(0)
             return NoUpdate()
+        finally:
+            # Ensure curses.echo is off and cursor is hidden after any exit path
+            curses.echo(False)
+            safe_curs_set(0)
+            self.screen.refresh()
+
+    def _draw_prompt_line(self, window, prompt, text, max_cols):
+        """Helper to draw the input line, handling truncation."""
+        window.clear()  # Clear only this prompt window
+
+        # Calculate actual displayed text length including prompt
+        full_line_len = len(prompt) + len(text)
+
+        # Determine how much of the input text to display
+        display_text = text
+        if full_line_len > max_cols:
+            # Calculate how many characters of text we can show after prompt and "..."
+            available_text_width = max_cols - len(prompt) - 3  # 3 for "..."
+            if available_text_width < 0:  # If prompt itself is too long
+                display_text = ""  # No space for text
+            else:
+                display_text = "..." + text[len(text) - available_text_width :]
+
+        window.addstr(0, 0, prompt, curses.A_REVERSE)
+        window.addstr(0, len(prompt), display_text)
+        window.refresh()
+
+        # Position cursor at the end of the displayed text
+        window.move(0, len(prompt) + len(display_text))
+        window.refresh()  # Only refresh this specific window
 
     def searching(
         self, board: InfiniBoard, src: Sequence[str], reading_state: ReadingState, tot
@@ -443,7 +491,7 @@ class Reader:
         rows, cols = self.screen.getmaxyx()
         # unnecessary
         # if self.spread == 2:
-        #     reading_state = dataclasses.replace(reading_state, textwidth=(cols - 7) // 2)
+        #    reading_state = dataclasses.replace(reading_state, textwidth=(cols - 7) // 2)
 
         x = (cols - reading_state.textwidth) // 2
         if self.spread == 1:
@@ -494,8 +542,12 @@ class Reader:
                 while True:
                     if s in self.keymap.Quit:
                         self.search_data = None
-                        self.screen.clear()
-                        self.screen.refresh()
+                        # for i in found:
+                        #    pad.chgat(i[0], i[1], i[2], pad.getbkgd())
+                        board.feed_temporary_style()
+                        # pad.format()
+                        # self.screen.clear()
+                        # self.screen.refresh()
                         return reading_state
                     # TODO: maybe >= 0?
                     elif s == Key("n") and reading_state.content_index == 0:
@@ -553,7 +605,7 @@ class Reader:
             if s in self.keymap.Quit:
                 self.search_data = None
                 # for i in found:
-                #     pad.chgat(i[0], i[1], i[2], pad.getbkgd())
+                #    pad.chgat(i[0], i[1], i[2], pad.getbkgd())
                 board.feed_temporary_style()
                 # pad.format()
                 # self.screen.clear()
@@ -610,15 +662,15 @@ class Reader:
             elif s == Key(curses.KEY_RESIZE):
                 return Key(curses.KEY_RESIZE)
 
-            # if reading_state.row + rows - 1 > pad.chunks[pad.find_chunkidx(reading_state.row)]:
-            #     reading_state = dataclasses.replace(
-            #         reading_state, row=pad.chunks[pad.find_chunkidx(reading_state.row)] + 1
-            #     )
+            # if reading_state.row + rows - 1 > board.chunks[board.find_chunkidx(reading_state.row)]:
+            #    reading_state = dataclasses.replace(
+            #        reading_state, row=board.chunks[board.find_chunkidx(reading_state.row)] + 1
+            #    )
 
             while found[sidx][0] not in list(
                 range(reading_state.row, reading_state.row + (rows - 1) * self.spread)
             ):
-                if found[sidx][0] > reading_state.row:
+                if found[sidx][0] > reading_state.row:  # This check is always true TODO
                     reading_state = dataclasses.replace(
                         reading_state, row=reading_state.row + ((rows - 1) * self.spread)
                     )
@@ -630,7 +682,7 @@ class Reader:
                         reading_state = dataclasses.replace(reading_state, row=0)
 
             # formats = [InlineStyle(row=i[0], col=i[1], n_letters=i[2], attr=curses.A_REVERSE) for i in found]
-            # pad.feed_style(formats)
+            # board.feed_style(formats)
             styles: List[InlineStyle] = []
             for n, i in enumerate(found):
                 attr = curses.A_REVERSE if n == sidx else curses.A_NORMAL
@@ -640,7 +692,7 @@ class Reader:
                 )
             board.feed_temporary_style(tuple(styles))
 
-            self.screen.clear()
+            self.screen.clear()  # Clears the whole screen
             self.screen.addstr(rows - 1, 0, msg, curses.A_REVERSE)
             self.screen.refresh()
             # pad.refresh(reading_state.row, 0, 0, x, rows - 2, x + reading_state.textwidth)
@@ -652,12 +704,16 @@ class Reader:
         self.screen.addstr(self.screen_rows - 1, 0, " Speaking! ", curses.A_REVERSE)
         self.screen.refresh()
         self.screen.timeout(1)
+
+        if self._tts_speaker is None:
+            return NoUpdate()
+
         try:
             self._tts_speaker.speak(text)
 
             while True:
                 if self._tts_speaker.is_done():
-                    k = self.keymap.PageDown[0]
+                    k: NoUpdate | Key = self.keymap.PageDown[0]
                     break
                 tmp = self.screen.getch()
                 k = NoUpdate() if tmp == -1 else Key(tmp)
@@ -703,12 +759,12 @@ class Reader:
     def cleanup(self) -> None:
         self.ebook.cleanup()
 
+        self.file_history.save_history()
+
         if isinstance(self._process_counting_letter, multiprocessing.Process):
             if self._process_counting_letter.is_alive():
                 self._process_counting_letter.terminate()
                 # weird python multiprocessing issue, need to call .join() before .close()
-                # ValueError: Cannot close a process while it is still running.
-                # You should first call join() or terminate().
                 self._process_counting_letter.join()
                 self._process_counting_letter.close()
 
@@ -740,7 +796,7 @@ class Reader:
 
     def get_all_book_contents(
         self, reading_state: ReadingState
-    ) -> Tuple[TextStructure, Tuple[TocEntry, ...], Union[Tuple[str, ...], Tuple[ET.Element, ...]]]:
+    ) -> Tuple[TextStructure, Tuple[TocEntry, ...], Tuple[Union[str, ET.Element], ...]]:
         if not self.seamless:
             raise RuntimeError("Reader.get_all_book_contents() only implemented when Seamless=True")
 
@@ -791,7 +847,7 @@ class Reader:
 
     def get_current_book_content(
         self, reading_state: ReadingState
-    ) -> Tuple[TextStructure, Tuple[TocEntry, ...], Union[Tuple[str, ...], Tuple[ET.Element, ...]]]:
+    ) -> Tuple[TextStructure, Tuple[TocEntry, ...], Tuple[Union[str, ET.Element], ...]]:
         contents = self.ebook.contents
         toc_entries = self.ebook.toc_entries
         content_path = contents[reading_state.content_index]
@@ -801,13 +857,15 @@ class Reader:
             textwidth=reading_state.textwidth,
             section_ids=set(toc_entry.section for toc_entry in toc_entries),  # type: ignore
         )
-        return text_structure, toc_entries, contents
+        return text_structure, toc_entries, tuple(contents)
 
     def read(self, reading_state: ReadingState) -> Union[ReadingState, Ebook]:
         # reusable loop indices
         i: Any
 
-        k = self.keymap.RegexSearch[0] if self.search_data else NoUpdate()
+        k: Union[Key, NoUpdate, str] = (
+            self.keymap.RegexSearch[0] if self.search_data else NoUpdate()
+        )
         rows, cols = self.screen.getmaxyx()
 
         mincols_doublespr = (
@@ -860,6 +918,7 @@ class Reader:
 
         board = InfiniBoard(
             screen=self.screen,
+            settings=self.settings,
             text=text_structure.text_lines,
             textwidth=reading_state.textwidth,
             default_style=text_structure.formatting,
@@ -893,6 +952,7 @@ class Reader:
                 else:
                     count = int(countstring)
                 if k in tuple(Key(i) for i in range(48, 58)):  # i.e., k is a numeral
+                    assert isinstance(k, Key)
                     countstring = countstring + k.char
                 else:
                     if k in self.keymap.Quit:
@@ -924,7 +984,7 @@ class Reader:
                             and reading_state.content_index == len(contents) - 1
                         ):
                             self.is_speaking = False
-                        continue
+                            continue
 
                     elif k in self.keymap.DoubleSpreadToggle:
                         if cols < mincols_doublespr:
@@ -1026,9 +1086,9 @@ class Reader:
                             )
 
                     # elif k in K["HalfScreenUp"] | K["HalfScreenDown"]:
-                    #     countstring = str(rows // 2)
-                    #     k = list(K["ScrollUp" if k in K["HalfScreenUp"] else "ScrollDown"])[0]
-                    #     continue
+                    #    countstring = str(rows // 2)
+                    #    k = list(K["ScrollUp" if k in K["HalfScreenUp"] else "ScrollDown"])[0]
+                    #    continue
 
                     elif k in self.keymap.NextChapter:
                         ntoc = find_current_content_index(
@@ -1295,9 +1355,9 @@ class Reader:
                                     else:
                                         current_content_index = reading_state.content_index
                                         # for n, content in enumerate(self.ebook.contents):
-                                        #     content_path = content
-                                        #     if reading_state.row < sum(totlines_per_content[:n]):
-                                        #         break
+                                        #    content_path = content
+                                        #    if reading_state.row < sum(totlines_per_content[:n]):
+                                        #       break
 
                                     content_path = self.ebook.contents[current_content_index]
                                     assert isinstance(content_path, str)
@@ -1310,24 +1370,25 @@ class Reader:
                                 if DEBUG:
                                     raise e
 
-                    elif (
-                        k in self.keymap.SwitchColor
-                        and self.is_color_supported
-                        and countstring in {"", "0", "1", "2"}
-                    ):
-                        if countstring == "":
-                            count_color = curses.pair_number(self.screen.getbkgd())
-                            if count_color not in {2, 3}:
-                                count_color = 1
-                            count_color = count_color % 3
-                        else:
-                            count_color = count
-                        self.screen.bkgd(curses.color_pair(count_color + 1))
-                        # pad.format()
+                    elif k in self.keymap.SwitchColor and self.is_color_supported:
+                        if not self.settings.NoColors:
+                            current_pair = curses.pair_number(self.screen.getbkgd())
+                            # Cycle between pair 1 and 2
+                            next_pair_index = (current_pair % 2) + 1
+                            self.screen.bkgd(curses.color_pair(next_pair_index))
+                            # Update board's internal screen
+                            # background if it's needed for its own calculations
+                            # Not directly needed if board uses A_NORMAL
+                            # board.screen.bkgd(curses.color_pair(next_pair_index))
+
+                        # Invalidate previous text to force redraw with new colors
+                        # This is implicit by returning
+                        # ReadingState, which triggers a full redraw.
                         return ReadingState(
                             content_index=reading_state.content_index,
                             textwidth=reading_state.textwidth,
                             row=reading_state.row,
+                            rel_pctg=reading_state.row / totlines,  # Preserve progress
                         )
 
                     elif k in self.keymap.AddBookmark:
@@ -1415,9 +1476,11 @@ class Reader:
                             return dataclasses.replace(
                                 marked_reading_state,
                                 textwidth=reading_state.textwidth,
-                                rel_pctg=None
-                                if marked_reading_state.textwidth == reading_state.textwidth
-                                else marked_reading_state.rel_pctg,
+                                rel_pctg=(
+                                    None
+                                    if marked_reading_state.textwidth == reading_state.textwidth
+                                    else marked_reading_state.rel_pctg
+                                ),
                                 section="",
                             )
                         else:
@@ -1480,6 +1543,7 @@ class Reader:
                                 content_index=reading_state.content_index,
                                 textwidth=reading_state.textwidth,
                                 row=reading_state.row,
+                                rel_pctg=reading_state.row / totlines,
                             )
 
                     countstring = ""
@@ -1497,7 +1561,7 @@ class Reader:
                     )
 
                 try:
-                    if self.setting.PageScrollAnimation and self.page_animation:
+                    if self.settings.PageScrollAnimation and self.page_animation:
                         self.screen.clear()
                         for i in range(1, reading_state.textwidth + 1):
                             curses.napms(1)
@@ -1556,7 +1620,7 @@ class Reader:
                     elif mouse_event[4] == curses.BUTTON2_CLICKED:
                         k = self.keymap.TTSToggle[0]
 
-                if checkpoint_row:
+                if checkpoint_row is not None:
                     board.feed_temporary_style()
                     checkpoint_row = None
 

@@ -69,12 +69,16 @@ def print_reading_history(state: State) -> None:
     dig = len(str(len(library_items) + 1))
     tcols = termc - dig - 2
     for n, item in enumerate(library_items):
-        print(
-            "{} {}".format(
-                str(n + 1).rjust(dig),
-                truncate(str(item), "...", tcols, tcols - 3),
+        try:
+            print(
+                "{} {}".format(
+                    str(n + 1).rjust(dig),
+                    truncate(str(item), "...", tcols, tcols - 3),
+                )
             )
-        )
+        except BrokenPipeError:
+            # Happens when output of epy is filtered through some pipe, e.g. head
+            break
 
 
 def parse_cli_args() -> argparse.Namespace:
@@ -162,10 +166,10 @@ def dump_ebook_content(filepath: str) -> None:
             sys.exit("ERROR: Badly-structured ebook.\n" + str(e))
         for i in ebook.contents:
             content = ebook.get_raw_text(i)
-            src_lines = parse_html(content)
-            assert isinstance(src_lines, tuple)
+            src_lines_structure = parse_html(content, textwidth=0)
+            assert isinstance(src_lines_structure.text_lines, tuple)
             # sys.stdout.reconfigure(encoding="utf-8")  # Python>=3.7
-            for j in src_lines:
+            for j in src_lines_structure.text_lines:
                 sys.stdout.buffer.write((j + "\n\n").encode("utf-8"))
     finally:
         ebook.cleanup()
